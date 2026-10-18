@@ -51,12 +51,12 @@ func run() error {
 	}
 	defer checker.Close(ctx)
 
-	version, err := checker.Version()
+	version, err := checker.Version(ctx)
 	if err != nil {
 		return err
 	}
 
-	match, err := checker.CheckRegexpPattern(pattern, text)
+	match, err := checker.CheckRegexpPattern(ctx, pattern, text)
 	if err != nil {
 		return err
 	}

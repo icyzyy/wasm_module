@@ -34,7 +34,9 @@ Layer responsibilities:
 - **Go host** (`go-host/wasmregexp`): loads the module with wazero, writes
   inputs into the buffer, calls the exports, and translates result codes into
   an idiomatic Go API (`New`, `CheckRegexpPattern`, `Version`, `Close`,
-  `FindWASM`).
+  `FindWASM`). Methods take a `context.Context`, and failures are testable
+  sentinels: `ErrInvalidPattern`, `ErrInvalidInput`, and `ErrClosed` (via
+  `errors.Is`).
 - **Demo CLI** (`go-host/cmd/demo`): the user-facing command tying it
   together.
 

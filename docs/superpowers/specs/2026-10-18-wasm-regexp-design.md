@@ -89,10 +89,18 @@ pub extern "C" fn version() -> i32; // length of version bytes written into IN_B
 ```go
 // Go package wasmregexp
 func New(ctx context.Context, wasmPath string) (*Checker, error) // errors if any required export is missing
-func (c *Checker) CheckRegexpPattern(pattern, text string) (bool, error)
-func (c *Checker) Version() (string, error)
-func (c *Checker) Close(ctx context.Context) error
+func (c *Checker) CheckRegexpPattern(ctx context.Context, pattern, text string) (bool, error)
+func (c *Checker) Version(ctx context.Context) (string, error)
+func (c *Checker) Close(ctx context.Context) error // idempotent
+
+// Sentinel errors, matched with errors.Is: ErrInvalidPattern (-1),
+// ErrInvalidInput (oversized/-2), ErrClosed (method after Close).
 ```
+
+Post-review revision (2026-10-18): methods take `ctx` (runtime is built
+with `WithCloseOnContextDone(true)` so cancellation interrupts an in-flight
+call); errors are wrapped sentinels; `Close` is idempotent and later calls
+fail with `ErrClosed`.
 
 ## What's left to the builder
 

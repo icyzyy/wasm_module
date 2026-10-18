@@ -29,10 +29,24 @@ const (
 	exportBuf   = "IN_BUF"
 )
 
+// Sentinel errors returned (possibly wrapped with context) by Checker
+// methods. Callers should test them with errors.Is, never by message string.
+var (
+	// ErrInvalidPattern reports that the pattern is not a syntactically
+	// valid regular expression.
+	ErrInvalidPattern = errors.New("invalid pattern")
+	// ErrInvalidInput reports that the combined input exceeds the module's
+	// 65536-byte shared buffer or is not valid UTF-8.
+	ErrInvalidInput = errors.New("invalid input: too large or not valid UTF-8")
+	// ErrClosed reports that a method was called on a closed Checker.
+	ErrClosed = errors.New("wasmregexp: checker is closed")
+)
+
 // Checker drives the wasm_module crate via wazero. It is safe for concurrent
 // use: both exports share one input buffer, so every call is serialized on
-// Checker.mu. Call CheckRegexpPattern or Version, and Close exactly once when
-// done. Construct with New.
+// Checker.mu. Call CheckRegexpPattern or Version with a context; Close when
+// done. Close is idempotent, and methods called after Close fail with
+// ErrClosed. Construct with New.
 type Checker struct {
 	runtime   wazero.Runtime
 	module    api.Module
@@ -40,6 +54,7 @@ type Checker struct {
 	versionFn api.Function
 	mem       api.Memory
 	bufPtr    uint64
+	closed    bool
 	mu        sync.Mutex
 }
 
@@ -63,7 +78,9 @@ func FindWASM(releaseDir string) (string, error) {
 }
 
 // New loads the wasm module at wasmPath into a fresh wazero runtime and
-// resolves its required exports (two functions, memory, IN_BUF).
+// resolves its required exports (two functions, memory, IN_BUF). The runtime
+// is configured with WithCloseOnContextDone, so cancelling ctx terminates an
+// in-flight wasm call instead of letting it run unkillably.
 //
 // # Errors
 //
@@ -75,7 +92,8 @@ func New(ctx context.Context, wasmPath string) (*Checker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read wasm module: %w", err)
 	}
-	runtime := wazero.NewRuntime(ctx)
+	config := wazero.NewRuntimeConfig().WithCloseOnContextDone(true)
+	runtime := wazero.NewRuntimeWithConfig(ctx, config)
 	module, err := runtime.InstantiateWithConfig(ctx, wasmBytes, wazero.NewModuleConfig())
 	if err != nil {
 		runtime.Close(ctx) // no leaked runtime on compile/instantiate failure
@@ -123,23 +141,28 @@ func missingExport(name string) error {
 }
 
 // CheckRegexpPattern reports whether text matches the regular expression
-// pattern, as compiled by the wasm module's regex engine.
+// pattern, as compiled by the wasm module's regex engine. The call honours
+// ctx cancellation via the runtime's CloseOnContextDone.
 //
 // # Errors
 //
-// Reports "invalid pattern" if pattern is not a syntactically valid regular
-// expression, "invalid input: too large or not valid UTF-8" if either input
-// is malformed or does not fit the module's 65536-byte input buffer, and an
-// error for any unexpected wasm result.
-func (c *Checker) CheckRegexpPattern(pattern, text string) (bool, error) {
-	ctx := context.Background()
+// Returns ErrInvalidPattern if pattern is not a syntactically valid regular
+// expression, ErrInvalidInput if the combined input does not fit the
+// module's 65536-byte buffer or is not valid UTF-8, ErrClosed if the Checker
+// is closed, and an error for any unexpected wasm result.
+func (c *Checker) CheckRegexpPattern(ctx context.Context, pattern, text string) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.closed {
+		return false, ErrClosed
+	}
 
 	// The wasm module rejects the same condition (a negative length cannot
 	// occur here); failing fast keeps the buffer writes in bounds.
 	if len(pattern)+len(text) > bufSize {
-		return false, errors.New("invalid input: too large or not valid UTF-8")
+		return false, fmt.Errorf("input is %d bytes, over the %d-byte buffer: %w",
+			len(pattern)+len(text), bufSize, ErrInvalidInput)
 	}
 
 	// Buffer layout per the wasm ABI: pattern bytes, then the text bytes.
@@ -170,24 +193,28 @@ func matchResult(res []uint64) (bool, error) {
 	case 0:
 		return false, nil
 	case -1:
-		return false, errors.New("invalid pattern")
+		return false, ErrInvalidPattern
 	case -2:
-		return false, errors.New("invalid input: too large or not valid UTF-8")
+		return false, ErrInvalidInput
 	default:
 		return false, fmt.Errorf("check_regexp_pattern returned unexpected result %d", code)
 	}
 }
 
-// Version returns the wasm module crate's version string, e.g. "0.1.0".
+// Version returns the wasm module crate's version string, e.g. "0.1.0". The
+// call honours ctx cancellation via the runtime's CloseOnContextDone.
 //
 // # Errors
 //
-// Reports an error if the wasm call fails or the returned length is outside
-// the input buffer's bounds.
-func (c *Checker) Version() (string, error) {
-	ctx := context.Background()
+// Returns ErrClosed if the Checker is closed, and an error if the wasm call
+// fails or the returned length is outside the input buffer's bounds.
+func (c *Checker) Version(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.closed {
+		return "", ErrClosed
+	}
 
 	res, err := c.versionFn.Call(ctx)
 	if err != nil {
@@ -208,8 +235,8 @@ func (c *Checker) Version() (string, error) {
 }
 
 // Close releases the wasm module and its runtime. It is safe to call on a
-// Checker at any point after New, and flushing no calls — Close simply stops
-// using the module afterwards.
+// Checker at any point after New, and calling it again is a no-op returning
+// nil. After Close, CheckRegexpPattern and Version fail with ErrClosed.
 //
 // # Errors
 //
@@ -217,6 +244,10 @@ func (c *Checker) Version() (string, error) {
 func (c *Checker) Close(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
 	return c.closeModules(ctx)
 }
 
