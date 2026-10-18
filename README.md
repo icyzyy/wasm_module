@@ -12,10 +12,9 @@ zero-dependency WebAssembly runtime.
 ```
 wasm_module/
 ├── src/            # Rust crate: layers from inner to outer
-│   └── wasm_ffi/   # Adapter layer: wasm exports + shared input buffer
-├── tests/          # Rust integration tests against the compiled API
+│   └── adapters/   # Adapter layer: wasm_ffi.rs — wasm exports + shared input buffer
 ├── go-host/        # Go host: everything on the Go side of the boundary
-│   └── wasmregexp/ # Host package wrapping the wasm module behind a Go API
+│   ├── wasmregexp/ # Host package wrapping the wasm module behind a Go API
 │   └── cmd/demo/   # Runnable demo CLI (this is the "see it work" entry point)
 ├── target/         # Cargo output; the .wasm artifact lands under
 │                   # target/wasm32-unknown-unknown/release/
@@ -25,12 +24,13 @@ wasm_module/
 
 Layer responsibilities:
 
-- **Domain** (`src`): pure regexp logic, no wasm awareness.
-- **Application** (`src`): the `check_pattern` use case orchestrating domain
-  calls and producing FFI result codes.
-- **Adapter / FFI** (`src/wasm_ffi`): the only code that knows about wasm —
-  it exposes the exports described below and shares a 65536-byte input buffer
-  with the host.
+- **Domain** (`src/domain`): pure regexp logic, no wasm awareness.
+- **Application** (`src/application`): the `check_pattern` use case
+  orchestrating domain calls and returning `Result<bool, InvalidPattern>`.
+- **Adapter / FFI** (`src/adapters/wasm_ffi.rs`): the only code that knows
+  about wasm — it exposes the exports described below, produces the FFI
+  result codes (1/0/-1/-2), and shares a 65536-byte input buffer with the
+  host.
 - **Go host** (`go-host/wasmregexp`): loads the module with wazero, writes
   inputs into the buffer, calls the exports, and translates result codes into
   an idiomatic Go API (`New`, `CheckRegexpPattern`, `Version`, `Close`,
